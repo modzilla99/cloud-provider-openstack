@@ -69,8 +69,8 @@ func GetFloatingIPs(ctx context.Context, client *gophercloud.ServiceClient, opts
 	return floatingIPList, nil
 }
 
-// GetFloatingIPByPortID get the floating IP of the given port.
-func GetFloatingIPByPortID(ctx context.Context, client *gophercloud.ServiceClient, portID string) (*floatingips.FloatingIP, error) {
+// GetFloatingIPsByPortID get the floating IP of the given port.
+func GetFloatingIPsByPortID(ctx context.Context, client *gophercloud.ServiceClient, portID string) ([]floatingips.FloatingIP, error) {
 	opt := floatingips.ListOpts{
 		PortID: portID,
 	}
@@ -83,7 +83,7 @@ func GetFloatingIPByPortID(ctx context.Context, client *gophercloud.ServiceClien
 		return nil, nil
 	}
 
-	return &ips[0], nil
+	return ips, nil
 }
 
 // GetFloatingNetworkID returns a floating network ID.

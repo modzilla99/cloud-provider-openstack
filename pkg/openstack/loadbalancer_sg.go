@@ -31,7 +31,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
-	netutils "k8s.io/utils/net"
 	"k8s.io/utils/strings/slices"
 
 	"k8s.io/cloud-provider-openstack/pkg/metrics"
@@ -57,9 +56,17 @@ func applyNodeSecurityGroupIDForLB(ctx context.Context, network *gophercloud.Ser
 			return fmt.Errorf("error getting server ID from the node: %w", err)
 		}
 
-		addr, _ := nodeAddressForLB(node, svcConf.preferredIPFamily)
-		if addr == "" {
-			// If node has no viable address let's ignore it.
+		var addrs []string
+		for _, f := range svcConf.enabledIPFamilies {
+			addr, _ := nodeAddressForLB(node, f)
+			if addr == "" {
+				continue
+			}
+			addrs = append(addrs, addr)
+		}
+
+		// If node has no viable address let's ignore it.
+		if len(addrs) == 0 {
 			continue
 		}
 
@@ -81,7 +88,7 @@ func applyNodeSecurityGroupIDForLB(ctx context.Context, network *gophercloud.Ser
 			}
 
 			// Only add SGs to the port actually attached to the LB
-			if !isPortMember(port, addr, svcConf.lbMemberSubnetID) {
+			if !isPortMember(port, addrs, svcConf.lbMemberSubnets) {
 				continue
 			}
 
@@ -237,23 +244,37 @@ func (lbaas *LbaasV2) ensureAndUpdateOctaviaSecurityGroup(ctx context.Context, c
 		lbSecGroupID = lbSecGroup.ID
 	}
 
-	mc := metrics.NewMetricContext("subnet", "get")
-	subnet, err := subnets.Get(ctx, lbaas.network, svcConf.lbMemberSubnetID).Extract()
-	if mc.ObserveRequest(err) != nil {
-		return fmt.Errorf(
-			"failed to find subnet %s from openstack: %v", svcConf.lbMemberSubnetID, err)
+	type cidrRule struct {
+		ethertype rules.RuleEtherType
+		cidr      string
 	}
 
-	etherType := rules.EtherType4
-	if netutils.IsIPv6CIDRString(subnet.CIDR) {
-		etherType = rules.EtherType6
-	}
-	cidrs := []string{subnet.CIDR}
-	if lbaas.opts.LBProvider == "ovn" {
+	var cidrs []cidrRule
+	if lbaas.opts.LBProvider != "ovn" {
+		for _, s := range svcConf.lbMemberSubnets {
+			mc := metrics.NewMetricContext("subnet", "get")
+			subnet, err := subnets.Get(ctx, lbaas.network, s.ID).Extract()
+			if mc.ObserveRequest(err) != nil {
+				return fmt.Errorf(
+					"failed to find subnet %+v from openstack: %v", s, err)
+			}
+
+			cidrs = append(cidrs, cidrRule{
+				ethertype: openstackutil.GetEtherTypeFromCIDR(subnet.CIDR),
+				cidr:      subnet.CIDR,
+			})
+		}
+	} else {
 		// OVN keeps the source IP of the incoming traffic. This means that we cannot just open the LB range, but we
 		// need to open for the whole world. This can be restricted by using the service.spec.loadBalancerSourceRanges.
 		// svcConf.allowedCIDR will give us the ranges calculated by GetLoadBalancerSourceRanges() earlier.
-		cidrs = svcConf.allowedCIDR
+		cidrs = make([]cidrRule, len(svcConf.allowedCIDR))
+		for i := range svcConf.allowedCIDR {
+			cidrs[i] = cidrRule{
+				ethertype: openstackutil.GetEtherTypeFromCIDR(svcConf.allowedCIDR[i]),
+				cidr:      svcConf.allowedCIDR[i],
+			}
+		}
 	}
 
 	existingRules, err := openstackutil.GetSecurityGroupRules(ctx, lbaas.network, rules.ListOpts{SecGroupID: lbSecGroupID})
@@ -263,37 +284,39 @@ func (lbaas *LbaasV2) ensureAndUpdateOctaviaSecurityGroup(ctx context.Context, c
 	}
 
 	// List of the security group rules wanted in the SG.
-	// Number of Ports plus the potential HealthCheckNodePort.
-	wantedRules := make([]rules.CreateOpts, 0, len(ports)+1)
+	// Number of CIDRs times (Ports + potential HealthCheckNodePort).
+	wantedRules := make([]rules.CreateOpts, 0, len(cidrs)*(len(ports)+1))
 
 	if apiService.Spec.HealthCheckNodePort != 0 {
 		// TODO(dulek): How should this work with OVN…? Do we need to allow all?
 		//              Probably the traffic goes from the compute node?
-		wantedRules = append(wantedRules,
-			rules.CreateOpts{
-				Direction:      rules.DirIngress,
-				Protocol:       rules.ProtocolTCP,
-				EtherType:      etherType,
-				RemoteIPPrefix: subnet.CIDR,
-				SecGroupID:     lbSecGroupID,
-				PortRangeMin:   int(apiService.Spec.HealthCheckNodePort),
-				PortRangeMax:   int(apiService.Spec.HealthCheckNodePort),
-			},
-		)
+		for i := range cidrs {
+			wantedRules = append(wantedRules,
+				rules.CreateOpts{
+					Direction:      rules.DirIngress,
+					Protocol:       rules.ProtocolTCP,
+					EtherType:      cidrs[i].ethertype,
+					RemoteIPPrefix: cidrs[i].cidr,
+					SecGroupID:     lbSecGroupID,
+					PortRangeMin:   int(apiService.Spec.HealthCheckNodePort),
+					PortRangeMax:   int(apiService.Spec.HealthCheckNodePort),
+				},
+			)
+		}
 	}
 
 	for _, port := range ports {
 		if port.NodePort == 0 { // It's 0 when AllocateLoadBalancerNodePorts=False
 			continue
 		}
-		for _, cidr := range cidrs {
-			protocol := strings.ToLower(string(port.Protocol)) // K8s uses TCP, Neutron uses tcp, etc.
+		for i := range cidrs {
+			protocol := rules.RuleProtocol(strings.ToLower(string(port.Protocol))) // K8s uses TCP, Neutron uses tcp, etc.
 			wantedRules = append(wantedRules,
 				rules.CreateOpts{
 					Direction:      rules.DirIngress,
-					Protocol:       rules.RuleProtocol(protocol),
-					EtherType:      etherType,
-					RemoteIPPrefix: cidr,
+					Protocol:       protocol,
+					EtherType:      cidrs[i].ethertype,
+					RemoteIPPrefix: cidrs[i].cidr,
 					SecGroupID:     lbSecGroupID,
 					PortRangeMin:   int(port.NodePort),
 					PortRangeMax:   int(port.NodePort),

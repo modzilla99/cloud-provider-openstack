@@ -30,23 +30,30 @@ import (
 	"github.com/gophercloud/gophercloud/v2/openstack/loadbalancer/v2/loadbalancers"
 	"github.com/gophercloud/gophercloud/v2/openstack/loadbalancer/v2/monitors"
 	"github.com/gophercloud/gophercloud/v2/openstack/loadbalancer/v2/pools"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/security/rules"
 	"github.com/gophercloud/gophercloud/v2/pagination"
 	version "github.com/hashicorp/go-version"
 	"k8s.io/apimachinery/pkg/util/wait"
 	klog "k8s.io/klog/v2"
+	netutils "k8s.io/utils/net"
 
 	"k8s.io/cloud-provider-openstack/pkg/metrics"
 	cpoerrors "k8s.io/cloud-provider-openstack/pkg/util/errors"
 )
 
-const (
-	OctaviaFeatureTags              = 0
-	OctaviaFeatureVIPACL            = 1
-	OctaviaFeatureFlavors           = 2
-	OctaviaFeatureTimeout           = 3
-	OctaviaFeatureAvailabilityZones = 4
-	OctaviaFeatureHTTPMonitorsOnUDP = 5
+type OctaviaFeature int
 
+const (
+	OctaviaFeatureTags OctaviaFeature = iota
+	OctaviaFeatureVIPACL
+	OctaviaFeatureFlavors
+	OctaviaFeatureTimeout
+	OctaviaFeatureAvailabilityZones
+	OctaviaFeatureHTTPMonitorsOnUDP
+	OctaviaFeatureAdditionalVIPs
+)
+
+const (
 	waitLoadbalancerInitDelay   = 1 * time.Second
 	waitLoadbalancerFactor      = 1.2
 	waitLoadbalancerActiveSteps = 23
@@ -90,7 +97,7 @@ func getOctaviaVersion(ctx context.Context, client *gophercloud.ServiceClient) (
 }
 
 // IsOctaviaFeatureSupported returns true if the given feature is supported in the deployed Octavia version.
-func IsOctaviaFeatureSupported(ctx context.Context, client *gophercloud.ServiceClient, feature int, lbProvider string) bool {
+func IsOctaviaFeatureSupported(ctx context.Context, client *gophercloud.ServiceClient, feature OctaviaFeature, lbProvider string) bool {
 	octaviaVer, err := getOctaviaVersion(ctx, client)
 	if err != nil {
 		klog.Warningf("Failed to get current Octavia API version: %v", err)
@@ -145,6 +152,15 @@ func IsOctaviaFeatureSupported(ctx context.Context, client *gophercloud.ServiceC
 		if currentVer.GreaterThanOrEqual(verHTTPMonitorsOnUDP) {
 			return true
 		}
+	case OctaviaFeatureAdditionalVIPs:
+		// ToDo(jlamp): Might be supported by ovn?
+		if lbProvider == "ovn" {
+			return false
+		}
+		verAdditionalVIPs, _ := version.NewVersion("v2.26")
+		if currentVer.GreaterThanOrEqual(verAdditionalVIPs) {
+			return true
+		}
 	default:
 		klog.Warningf("Feature %d not recognized", feature)
 	}
@@ -160,6 +176,14 @@ func getTimeoutSteps(name string, steps int) int {
 		}
 	}
 	return steps
+}
+
+// GetEtherTypeFromCIDR returns the EtherType (IPv4/IPv6) for the given CIDR
+func GetEtherTypeFromCIDR(cidr string) rules.RuleEtherType {
+	if netutils.IsIPv6CIDRString(cidr) {
+		return rules.EtherType6
+	}
+	return rules.EtherType4
 }
 
 // WaitActiveAndGetLoadBalancer wait for LB active then return the LB object for further usage

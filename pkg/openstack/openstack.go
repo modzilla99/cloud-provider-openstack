@@ -120,6 +120,7 @@ type LoadBalancerOpts struct {
 	MaxSharedLB                    int                 `gcfg:"max-shared-lb"`                      //  Number of Services in maximum can share a single load balancer. Default 2
 	ContainerStore                 string              `gcfg:"container-store"`                    // Used to specify the store of the tls-container-ref
 	ProviderRequiresSerialAPICalls bool                `gcfg:"provider-requires-serial-api-calls"` // default false, the provider supports the "bulk update" API call
+	ForceDualStack                 bool                `gcfg:"force-dual-stack"`                   // If true, creates DualStack LoadBalancers with additional VIPs (Octavia v2.26+, Amphora)
 	// revive:disable:var-naming
 	TlsContainerRef string `gcfg:"default-tls-container-ref"` //  reference to a tls container
 	// revive:enable:var-naming

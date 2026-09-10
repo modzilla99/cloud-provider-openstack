@@ -289,6 +289,7 @@ func (r *Routes) CreateRoute(ctx context.Context, clusterName string, nameHint s
 
 	klog.V(4).Infof("Using nexthop %v for node %v", addr, route.TargetNode)
 
+	// NETWAYS: We do not support atomic route updates, so this path will be used:
 	if !r.atomicRoutes {
 		// classical logic
 		r.Lock()
@@ -303,6 +304,7 @@ func (r *Routes) CreateRoute(ctx context.Context, clusterName string, nameHint s
 		routes := router.Routes
 
 		for _, item := range routes {
+			// ToDo(jlamp): Shouldn't pre existing routes be deleted?
 			if item.DestinationCIDR == route.DestinationCIDR && item.NextHop == addr {
 				klog.V(4).Infof("Skipping existing route: %v", route)
 				return nil

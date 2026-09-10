@@ -3,10 +3,11 @@ package openstack
 import (
 	"context"
 	"fmt"
-	"k8s.io/utils/ptr"
 	"reflect"
 	"sort"
 	"testing"
+
+	"k8s.io/utils/ptr"
 
 	"github.com/gophercloud/gophercloud/v2"
 	"github.com/gophercloud/gophercloud/v2/openstack/loadbalancer/v2/listeners"
@@ -715,7 +716,7 @@ func TestLbaasV2_createLoadBalancerStatus(t *testing.T) {
 	type fields struct {
 		LoadBalancer LoadBalancer
 	}
-	type result struct {
+	type result []struct {
 		HostName  string
 		IPAddress string
 		IPMode    *corev1.LoadBalancerIPMode
@@ -723,7 +724,7 @@ func TestLbaasV2_createLoadBalancerStatus(t *testing.T) {
 	type args struct {
 		service *corev1.Service
 		svcConf *serviceConfig
-		addr    string
+		addrs   []string
 	}
 	tests := []struct {
 		name   string
@@ -750,11 +751,11 @@ func TestLbaasV2_createLoadBalancerStatus(t *testing.T) {
 				svcConf: &serviceConfig{
 					proxyProtocolVersion: nil,
 				},
-				addr: "10.10.0.6",
+				addrs: []string{"10.10.0.6"},
 			},
-			want: result{
+			want: result{{
 				HostName: "testHostName",
-			},
+			}},
 		},
 		{
 			name: "it should return fakehostname if proxyProtocol & IngressHostName is enabled without svc annotation",
@@ -775,10 +776,11 @@ func TestLbaasV2_createLoadBalancerStatus(t *testing.T) {
 				svcConf: &serviceConfig{
 					proxyProtocolVersion: ptr.To(pools.ProtocolPROXY),
 				},
-				addr: "10.10.0.6",
+				addrs: []string{"10.10.0.6", "2a01:db8::abc"},
 			},
 			want: result{
-				HostName: "10.10.0.6.ingress-suffix",
+				{HostName: "10.10.0.6.ingress-suffix"},
+				{HostName: "2a01:db8::abc.ingress-suffix"},
 			},
 		},
 		{
@@ -800,11 +802,17 @@ func TestLbaasV2_createLoadBalancerStatus(t *testing.T) {
 				svcConf: &serviceConfig{
 					proxyProtocolVersion: nil,
 				},
-				addr: "10.10.0.6",
+				addrs: []string{"10.10.0.6", "2a01:db8::abc"},
 			},
 			want: result{
-				IPAddress: "10.10.0.6",
-				IPMode:    &ipmodeVIP,
+				{
+					IPAddress: "10.10.0.6",
+					IPMode:    &ipmodeVIP,
+				},
+				{
+					IPAddress: "2a01:db8::abc",
+					IPMode:    &ipmodeVIP,
+				},
 			},
 		},
 		{
@@ -826,11 +834,17 @@ func TestLbaasV2_createLoadBalancerStatus(t *testing.T) {
 				svcConf: &serviceConfig{
 					proxyProtocolVersion: ptr.To(pools.ProtocolPROXY),
 				},
-				addr: "10.10.0.6",
+				addrs: []string{"10.10.0.6", "2a01:db8::abc"},
 			},
 			want: result{
-				IPAddress: "10.10.0.6",
-				IPMode:    &ipmodeProxy,
+				{
+					IPAddress: "10.10.0.6",
+					IPMode:    &ipmodeProxy,
+				},
+				{
+					IPAddress: "2a01:db8::abc",
+					IPMode:    &ipmodeProxy,
+				},
 			},
 		},
 	}
@@ -840,10 +854,12 @@ func TestLbaasV2_createLoadBalancerStatus(t *testing.T) {
 				LoadBalancer: tt.fields.LoadBalancer,
 			}
 
-			result := lbaas.createLoadBalancerStatus(tt.args.service, tt.args.svcConf, tt.args.addr)
-			assert.Equal(t, tt.want.HostName, result.Ingress[0].Hostname)
-			assert.Equal(t, tt.want.IPAddress, result.Ingress[0].IP)
-			assert.Equal(t, tt.want.IPMode, result.Ingress[0].IPMode)
+			result := lbaas.createLoadBalancerStatus(tt.args.service, tt.args.svcConf, tt.args.addrs)
+			for i, want := range tt.want {
+				assert.Equal(t, want.HostName, result.Ingress[i].Hostname)
+				assert.Equal(t, want.IPAddress, result.Ingress[i].IP)
+				assert.Equal(t, want.IPMode, result.Ingress[i].IPMode)
+			}
 		})
 	}
 }
@@ -1805,7 +1821,7 @@ func TestLbaasV2_getMemberSubnetID(t *testing.T) {
 		name    string
 		opts    LoadBalancerOpts
 		service *corev1.Service
-		want    string
+		want    []memberSubnet
 		wantErr string
 	}{
 		{
@@ -1819,7 +1835,7 @@ func TestLbaasV2_getMemberSubnetID(t *testing.T) {
 					},
 				},
 			},
-			want:    "member-subnet-id",
+			want:    []memberSubnet{{ID: "member-subnet-id"}},
 			wantErr: "",
 		},
 		{
@@ -1832,14 +1848,14 @@ func TestLbaasV2_getMemberSubnetID(t *testing.T) {
 					},
 				},
 			},
-			want:    "lb-class-member-subnet-id-5678",
+			want:    []memberSubnet{{ID: "lb-class-member-subnet-id-5678"}},
 			wantErr: "",
 		},
 		{
 			name:    "get member subnet id from default config",
 			opts:    lbaasOpts,
 			service: &corev1.Service{},
-			want:    "default-memberSubnetId",
+			want:    []memberSubnet{{ID: "default-memberSubnetId"}},
 			wantErr: "",
 		},
 		{
@@ -1852,7 +1868,7 @@ func TestLbaasV2_getMemberSubnetID(t *testing.T) {
 					},
 				},
 			},
-			want:    "",
+			want:    nil,
 			wantErr: "invalid loadbalancer class \"invalid-lb-class\"",
 		},
 	}
@@ -1918,8 +1934,8 @@ func TestBuildBatchUpdateMemberOpts(t *testing.T) {
 			nodes: []*corev1.Node{node1, node2},
 			port:  corev1.ServicePort{NodePort: 0},
 			svcConf: &serviceConfig{
-				preferredIPFamily:   corev1.IPv4Protocol,
-				lbMemberSubnetID:    "subnet-12345-test",
+				enabledIPFamilies:   []corev1.IPFamily{corev1.IPv4Protocol},
+				lbMemberSubnets:     []memberSubnet{{ID: "subnet-12345-test"}},
 				healthCheckNodePort: 8081,
 			},
 			expectedLen:             0,
@@ -1930,8 +1946,8 @@ func TestBuildBatchUpdateMemberOpts(t *testing.T) {
 			nodes: []*corev1.Node{node1, node2},
 			port:  corev1.ServicePort{NodePort: 8080},
 			svcConf: &serviceConfig{
-				preferredIPFamily:   corev1.IPv4Protocol,
-				lbMemberSubnetID:    "subnet-12345-test",
+				enabledIPFamilies:   []corev1.IPFamily{corev1.IPv4Protocol},
+				lbMemberSubnets:     []memberSubnet{{ID: "subnet-12345-test"}},
 				healthCheckNodePort: 8081,
 				enableMonitor:       false,
 			},
@@ -1943,8 +1959,8 @@ func TestBuildBatchUpdateMemberOpts(t *testing.T) {
 			nodes: []*corev1.Node{node1, node2},
 			port:  corev1.ServicePort{NodePort: 8080},
 			svcConf: &serviceConfig{
-				preferredIPFamily:   corev1.IPv4Protocol,
-				lbMemberSubnetID:    "subnet-12345-test",
+				enabledIPFamilies:   []corev1.IPFamily{corev1.IPv4Protocol},
+				lbMemberSubnets:     []memberSubnet{{ID: "subnet-12345-test"}},
 				healthCheckNodePort: 8081,
 				enableMonitor:       true,
 			},
@@ -1956,8 +1972,8 @@ func TestBuildBatchUpdateMemberOpts(t *testing.T) {
 			nodes: []*corev1.Node{node1, node2},
 			port:  corev1.ServicePort{NodePort: 0},
 			svcConf: &serviceConfig{
-				preferredIPFamily:   "invalid-family",
-				lbMemberSubnetID:    "subnet-12345-test",
+				enabledIPFamilies:   []corev1.IPFamily{"invalid-family"},
+				lbMemberSubnets:     []memberSubnet{{ID: "subnet-12345-test"}},
 				healthCheckNodePort: 8081,
 			},
 			expectedLen:             0,
@@ -1975,8 +1991,8 @@ func TestBuildBatchUpdateMemberOpts(t *testing.T) {
 			},
 			port: corev1.ServicePort{NodePort: 8080},
 			svcConf: &serviceConfig{
-				preferredIPFamily:   corev1.IPv4Protocol,
-				lbMemberSubnetID:    "subnet-12345-test",
+				enabledIPFamilies:   []corev1.IPFamily{corev1.IPv4Protocol},
+				lbMemberSubnets:     []memberSubnet{{ID: "subnet-12345-test"}},
 				healthCheckNodePort: 8081,
 				enableMonitor:       false,
 			},
